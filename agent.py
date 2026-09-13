@@ -1,9 +1,7 @@
 """
 Agent class.
 Encapsulates an AI agent, its search algorithm, physical position, collected keys,
-re-planning triggers, and responsive movement timers.
-When blocked by closed doors, agents dynamically calculate alternative routes
-to other accessible keys or to door switches to open locked paths.
+performance telemetry, and responsive movement timers.
 """
 from typing import List, Tuple, Optional
 from collections import deque
@@ -21,20 +19,24 @@ class Agent:
         self.r, self.c = world.start_pos
         self.collected_keys = frozenset()
         self.finished = False
-        self.status = "SEARCHING"  # "SEARCHING", "MOVING", "REPLANNING", "TRAPPED", "FINISHED"
+        self.finish_time: Optional[float] = None
+        self.status = "SEARCHING"  # "SEARCHING", "MOVING", "REPLANNING", "OPENING_DOOR", "FINISHED"
 
         # Movement path and execution
         self.path: List[Tuple[int, int]] = []
         self.path_index = 0
         self.move_accumulator = 0.0
+        self.steps_taken = 0
 
-        # Telemetry & Re-planning
+        # Telemetry & Metrics
         self.search_instance = None
         self.last_world_revision = -1
         self.replans_count = 0
         self.total_expanded = 0
         self.total_generated = 0
+        self.max_frontier_size = 0
         self.last_frontier_size = 0
+        self.final_path_length = 0
 
         self.start_new_search()
 
@@ -76,129 +78,111 @@ class Agent:
                     queue.append((nr, nc))
         return []
 
-    def calculate_alternative_route(self, blocked_pos: Optional[Tuple[int, int]] = None) -> bool:
+    def handle_blocked_path(self, blocked_pos: Optional[Tuple[int, int]] = None):
         """
         When stuck or blocked by a closed door:
-        1. Look for another uncollected key that is currently reachable.
-        2. If no key is directly reachable, calculate a path to an open switch door (Door 1 or 2)
-           prioritizing the color of the blocked door or remaining keys to unlock them.
-        Returns True if an alternative route was found and set, False otherwise.
+        Priority 1: Recalculate another passable path to the uncollected key(s) or exit.
+        Priority 2: If fail (blocked in front), calculate path to the open partner door of that color
+                    to pass through it and flip the closed door open!
         """
-        remaining_keys = [k for k in self.world.keys if k not in self.collected_keys]
+        self.replans_count += 1
+        self.status = "REPLANNING"
 
-        # 1. First priority: Calculate route to another uncollected key that is open and passable
-        key_candidates = []
-        for k in remaining_keys:
-            kp = self._bfs_passable_path(self.pos, k)
-            if kp and len(kp) > 1:
-                key_candidates.append((len(kp), kp))
-        if key_candidates:
-            key_candidates.sort(key=lambda x: x[0])
-            self.path = key_candidates[0][1]
+        # 1. First Priority: Try to find a direct passable route to remaining goals
+        # Check remaining keys or exit
+        remaining_keys = [k for k in self.world.keys if k not in self.collected_keys]
+        targets = remaining_keys if remaining_keys else [self.world.exit_pos]
+
+        best_direct_path = None
+        for t in targets:
+            p = self._bfs_passable_path(self.pos, t)
+            if p and len(p) > 1:
+                if best_direct_path is None or len(p) < len(best_direct_path):
+                    best_direct_path = p
+
+        if best_direct_path:
+            self.path = best_direct_path
             self.path_index = 0
             self.status = "MOVING"
-            return True
+            return
 
-        # 2. Second priority: Find reachable switch doors (Door 1 or Door 2) to open locked doors
-        blocked_door = self.world.door_map.get(blocked_pos) if blocked_pos else None
-        blocked_color = blocked_door.color if blocked_door else None
+        # 2. Second Priority: Open the closed door in front of us!
+        # Find the closed door blocking us
+        closed_door = self.world.door_map.get(blocked_pos) if blocked_pos else None
+        if not closed_door:
+            # Check adjacent closed doors
+            for nr, nc in self.world.maze.get_neighbors(self.r, self.c):
+                d = self.world.door_map.get((nr, nc))
+                if d and not self.world.is_door_open(d):
+                    closed_door = d
+                    break
 
-        # Determine which colors are still needed for uncollected keys
-        needed_colors = {
-            col for i, col in enumerate(["RED", "BLUE", "GREEN"])
-            if i < len(self.world.keys) and self.world.keys[i] in remaining_keys
-        }
+        if closed_door:
+            # Partner door of this color is currently open (1)!
+            partner_door = self.world.get_partner_door(closed_door)
+            if partner_door and self.world.is_door_open(partner_door):
+                partner_path = self._bfs_passable_path(self.pos, partner_door.pos)
+                if partner_path and len(partner_path) > 1:
+                    self.path = partner_path
+                    self.path_index = 0
+                    self.status = "OPENING_DOOR"
+                    return
 
-        # Build candidate switches grouped by priority:
-        # Priority 0: Switch for the door that directly blocked us
-        # Priority 1: Switch for a key that has not yet been collected and whose gates (Door 3/4) are still closed
-        # Priority 2: Any other reachable switch
-        priority_buckets = {0: [], 1: [], 2: []}
-        for p, d in self.world.door_map.items():
-            if d.number in (1, 2):
-                if blocked_color and d.color == blocked_color:
-                    priority_buckets[0].append(p)
-                elif d.color in needed_colors and (not self.world.door_closed_state[d.color][3] or not self.world.door_closed_state[d.color][4]):
-                    priority_buckets[1].append(p)
-                else:
-                    priority_buckets[2].append(p)
+        # Fallback: run standard search from current state
+        self.start_new_search()
 
-        for prio in [0, 1, 2]:
-            bucket_paths = []
-            for sw_pos in priority_buckets[prio]:
-                sp = self._bfs_passable_path(self.pos, sw_pos)
-                if sp and len(sp) > 1:
-                    bucket_paths.append((len(sp), sp))
-            if bucket_paths:
-                bucket_paths.sort(key=lambda x: x[0])
-                self.path = bucket_paths[0][1]
-                self.path_index = 0
-                self.status = "MOVING"
-                return True
-
-        return False
-
-    def update(self, dt: float, move_speed: float) -> bool:
+    def update(self, dt: float, move_speed: float, current_time: float) -> bool:
         """
         Updates search and movement incrementally.
         dt: delta time in seconds.
         move_speed: cells per second.
+        current_time: total elapsed race time.
         Returns True if this agent reached the winning condition on this update.
         """
         if self.finished:
             self.status = "FINISHED"
             return False
 
-        # 1. Environment Change Detection:
-        # If doors changed, check if our upcoming path is blocked
+        # 1. Environment Change Detection & Adversarial Blocking Check
         if self.world.revision != self.last_world_revision:
             self.last_world_revision = self.world.revision
-            if self.path and not self._is_upcoming_path_valid():
-                self.replans_count += 1
-                self.status = "REPLANNING"
-                # Check for alternative route immediately
+            if self.path and not self._is_path_passable():
                 first_blocked = None
                 for pr, pc in self.path[self.path_index:]:
-                    if not self.world.is_door_passable(pr, pc):
+                    if not self.world.is_cell_passable(pr, pc):
                         first_blocked = (pr, pc)
                         break
-                if not self.calculate_alternative_route(first_blocked):
-                    self.start_new_search()
+                self.handle_blocked_path(first_blocked)
 
         # 2. Search Execution (if path not yet found):
         if not self.path:
             if self.search_instance is not None and not self.search_instance.is_finished():
-                self.status = "SEARCHING"
+                if self.status not in ("REPLANNING", "OPENING_DOOR"):
+                    self.status = "SEARCHING"
                 # Expand a bounded number of nodes per frame to NEVER freeze the UI
                 self.search_instance.step(MAX_SEARCH_STEPS_PER_FRAME)
                 
-                # Update live stats
+                # Update live telemetry stats
                 self.total_expanded = self.search_instance.expanded_count
                 self.total_generated = self.search_instance.generated_count
                 self.last_frontier_size = len(self.search_instance.frontier_states)
+                if self.last_frontier_size > self.max_frontier_size:
+                    self.max_frontier_size = self.last_frontier_size
 
                 if self.search_instance.is_finished():
                     if self.search_instance.success:
                         self.path = self.search_instance.get_path()
                         self.path_index = 0
+                        self.final_path_length = len(self.path)
                         self.status = "MOVING"
                     else:
-                        # Search exhausted without finding path (currently trapped behind doors)
-                        self.replans_count += 1
-                        if not self.calculate_alternative_route():
-                            self.status = "TRAPPED"
-            elif self.status == "TRAPPED":
-                # When trapped, try to calculate an alternative route periodically
-                self.move_accumulator += dt
-                if self.move_accumulator > 0.3:
-                    self.move_accumulator = 0.0
-                    if not self.calculate_alternative_route():
-                        self.start_new_search()
-                return False
+                        # Search failed (completely blocked) -> trigger second priority to open door
+                        self.handle_blocked_path()
 
         # 3. Responsive Movement (moving cell by cell):
         if self.path and self.path_index < len(self.path):
-            self.status = "MOVING"
+            if self.status != "OPENING_DOOR":
+                self.status = "MOVING"
             self.move_accumulator += dt
             step_interval = 1.0 / move_speed
 
@@ -208,7 +192,7 @@ class Agent:
                 # Next step coordinate
                 next_pos = self.path[self.path_index]
                 
-                # If path starts at current position, advance to the next
+                # If path starts at current position, advance to next
                 if next_pos == self.pos:
                     self.path_index += 1
                     if self.path_index >= len(self.path):
@@ -216,45 +200,41 @@ class Agent:
                         break
                     next_pos = self.path[self.path_index]
 
-                # Validate whether the next cell is physically passable right now
-                if not self.world.is_door_passable(next_pos[0], next_pos[1]):
-                    # Door closed in front of us! Must replan and calculate alternative route
-                    self.replans_count += 1
-                    self.status = "REPLANNING"
-                    if not self.calculate_alternative_route(next_pos):
-                        self.start_new_search()
+                # Check if next step is blocked by a closed door (door state = 0)
+                if not self.world.is_cell_passable(next_pos[0], next_pos[1]):
+                    # Door closed in front of us! Execute two-tier priority replanning
+                    self.handle_blocked_path(next_pos)
                     break
 
                 # Execute movement to next cell
                 self.r, self.c = next_pos
                 self.path_index += 1
+                self.steps_taken += 1
+
+                # Adversarial Door Action: If stepped through an open door, flick it!
+                # Passed door immediately closes (0), opening its partner (1)
+                toggled = self.world.on_agent_pass_door(self.r, self.c)
+                if toggled and self.status == "OPENING_DOOR":
+                    # Successfully opened the door! Recalculate fresh path to original goal
+                    self.start_new_search()
+                    break
 
                 # Check key collection
                 if self.pos in self.world.keys and self.pos not in self.collected_keys:
                     self.collected_keys = self.collected_keys | frozenset([self.pos])
-                    # If this agent was moving towards a sub-goal, start fresh search towards remaining goals
+                    # If this agent was moving towards a sub-goal, continue or replan if needed
                     if not self.finished and len(self.collected_keys) < len(self.world.keys):
                         self.start_new_search()
                         break
 
-                # Check door interaction (switches/gates)
-                world_changed = self.world.on_agent_enter_cell(self.r, self.c)
-                if world_changed:
-                    # Environment changed globally!
-                    self.last_world_revision = self.world.revision
-                    # If we stepped on an open switch door, start fresh full search now that gates opened
-                    door = self.world.door_map.get(self.pos)
-                    if door and door.number in (1, 2):
-                        self.start_new_search()
-                        break
-
-                # Check WIN condition: All 3 keys AND at exit
+                # Check WIN / PASS condition: All 3 keys AND at exit
                 if len(self.collected_keys) == len(self.world.keys) and self.pos == self.world.exit_pos:
                     self.finished = True
+                    self.finish_time = current_time
                     self.status = "FINISHED"
                     return True
 
-                # If we exhausted our current plan segment, trigger next search step
+                # If current planned path segment finished without winning, start next search
                 if self.path_index >= len(self.path):
                     self.path = []
                     if not self.finished:
@@ -263,12 +243,13 @@ class Agent:
 
         return False
 
-    def _is_upcoming_path_valid(self) -> bool:
-        """Verifies if remaining steps in current path do not cross closed doors."""
+    def _is_path_passable(self) -> bool:
+        """Checks if the remaining steps in current path are completely passable."""
         if not self.path:
             return True
         for i in range(self.path_index, len(self.path)):
             pr, pc = self.path[i]
-            if not self.world.is_door_passable(pr, pc):
+            if not self.world.is_cell_passable(pr, pc):
                 return False
         return True
+

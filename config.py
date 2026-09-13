@@ -43,12 +43,13 @@ COLOR_KEY = (255, 215, 0)       # Gold
 COLOR_EXIT = (50, 255, 140)      # Neon Emerald Green
 COLOR_START = (100, 180, 255)    # Ice Blue
 
-# Door Colors (Bright, distinct)
+# Door Colors (Bright, distinct 3 colors)
 DOOR_COLORS = {
-    "RED": (255, 60, 60),
-    "BLUE": (60, 130, 255),
-    "GREEN": (40, 220, 90)
+    "RED": (255, 65, 65),
+    "BLUE": (65, 140, 255),
+    "GREEN": (50, 235, 110)
 }
+DOOR_TOGGLE_INTERVAL = 3.0  # seconds between alternating door open/close states
 
 # Agent Colors & Names
 AGENT_CONFIGS = [

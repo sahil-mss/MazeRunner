@@ -97,14 +97,18 @@ def main():
         # ----------------------------------------------------
         # 2. Logic Update
         # ----------------------------------------------------
-        if not paused and winner is None:
+        all_finished = all(a.finished for a in agents)
+
+        if not paused and not all_finished:
             elapsed_time += dt
 
             # Update all agents incrementally (search stepping + movement)
             for agent in agents:
-                reached_win = agent.update(dt, move_speed)
+                reached_win = agent.update(dt, move_speed, elapsed_time)
                 if reached_win and winner is None:
                     winner = agent
+
+            all_finished = all(a.finished for a in agents)
 
         # ----------------------------------------------------
         # 3. Drawing / Rendering (Smooth 60 FPS)
@@ -121,7 +125,7 @@ def main():
         # Draw Start and Exit positions
         renderer.draw_start_and_exit(world)
 
-        # Draw Colored Gates / Doors
+        # Draw 2 Doors for each of 3 colors (alternating 1,0 or 0,1)
         renderer.draw_doors(world)
 
         # Draw 3 Diamond Keys
@@ -131,14 +135,14 @@ def main():
         renderer.draw_agents(agents, focus_idx)
 
         # Top Timer and Header Bar
-        ui.draw_top_bar(elapsed_time, paused, winner, move_speed, focus_idx)
+        ui.draw_top_bar(elapsed_time, paused, all_finished, winner, move_speed, focus_idx)
 
         # Bottom Live Statistics Panel
         ui.draw_bottom_panel(agents, world, focus_idx)
 
-        # Winner Overlay Modal if a winner has been crowned
-        if winner is not None:
-            ui.draw_winner_overlay(winner, elapsed_time)
+        # High Score Leaderboard Overlay Modal after all agents finish
+        if all_finished:
+            ui.draw_leaderboard(agents)
 
         pygame.display.flip()
 

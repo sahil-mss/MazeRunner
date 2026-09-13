@@ -91,32 +91,30 @@ class Renderer:
 
     def draw_doors(self, world: World):
         """
-        Draws the 9 colored doors.
-        Door 1 & 2: Coloured frame passage.
-        Door 3: Solid colored barrier when closed, glowing opening with frame when open.
+        Draws the 6 colored doors (2 per color: RED, BLUE, GREEN).
+        Shows clear binary state:
+        - Open (1): Hollow glowing frame with colored border and '1' / 'OPEN' indicator.
+        - Closed (0): Solid colored barrier with cross / hatch and '0' / 'LOCK' indicator.
         """
         for door in world.doors:
             x, y = self.grid_to_screen(door.r, door.c)
             base_col = DOOR_COLORS[door.color]
-            is_open = world.is_door_passable(door.r, door.c)
+            is_open = world.is_door_open(door)
 
             rect = pygame.Rect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4)
+            lbl_text = f"D{door.door_id}"
             if is_open:
-                # Open door: glowing outline & gate pillars
-                pygame.draw.rect(self.screen, base_col, rect, width=2, border_radius=3)
-                # Gate bars indicator
-                pygame.draw.line(self.screen, base_col, (x + 5, y + 5), (x + 5, y + TILE_SIZE - 5), 1)
-                pygame.draw.line(self.screen, base_col, (x + TILE_SIZE - 5, y + 5), (x + TILE_SIZE - 5, y + TILE_SIZE - 5), 1)
+                # Open Door (1): Accessible passageway with glowing portal frame
+                pygame.draw.rect(self.screen, (20, 35, 28), rect, border_radius=4)
+                pygame.draw.rect(self.screen, base_col, rect, width=2, border_radius=4)
+                txt = self.font_tiny.render(lbl_text, True, base_col)
+                self.screen.blit(txt, txt.get_rect(center=rect.center))
             else:
-                # Closed door (Door 3): Solid barrier with dark hatching
-                pygame.draw.rect(self.screen, base_col, rect, border_radius=3)
-                pygame.draw.rect(self.screen, (255, 255, 255), rect, width=1, border_radius=3)
-
-            # Draw door label (e.g. R1, B3, G2)
-            lbl_text = f"{door.color[0]}{door.number}"
-            txt_col = (20, 20, 20) if not is_open else (240, 240, 240)
-            txt = self.font_tiny.render(lbl_text, True, txt_col)
-            self.screen.blit(txt, txt.get_rect(center=rect.center))
+                # Closed Door (0): Solid impassable barrier
+                pygame.draw.rect(self.screen, base_col, rect, border_radius=4)
+                pygame.draw.rect(self.screen, (255, 255, 255), rect, width=1, border_radius=4)
+                txt = self.font_tiny.render(lbl_text, True, (20, 20, 20))
+                self.screen.blit(txt, txt.get_rect(center=rect.center))
 
     def draw_search_visualization(self, agents: List[Agent], focus_idx: int):
         """

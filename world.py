@@ -1,21 +1,22 @@
 """
 Global World Model:
-Handles keys, exit, and the shared 9-door dynamic mechanism.
-Guarantees full initial reachability while maintaining dynamic adversarial effects.
+Handles keys, exit, and two alternating doors of three colors each (RED, BLUE, GREEN).
+For each color, exactly one door is open (1) and the other is closed (0), alternating periodically or upon trigger.
 """
 import random
-from config import ROWS, COLS
+from typing import Dict, Tuple, List, Optional
+from config import ROWS, COLS, DOOR_TOGGLE_INTERVAL
 from maze import Maze
 
 class Door:
-    def __init__(self, r: int, c: int, color: str, number: int):
+    def __init__(self, r: int, c: int, color: str, door_id: int):
         self.r = r
         self.c = c
         self.color = color      # "RED", "BLUE", or "GREEN"
-        self.number = number    # 1, 2, 3, or 4
+        self.door_id = door_id  # 1 or 2
 
     @property
-    def pos(self):
+    def pos(self) -> Tuple[int, int]:
         return (self.r, self.c)
 
 class World:
@@ -23,72 +24,52 @@ class World:
         self.maze = maze
         self.start_pos = (0, 0)
         self.exit_pos = (0, 0)
-        self.keys = []     # List of (r, c)
-        self.doors = []    # List of Door objects
-        self.door_map = {} # (r, c) -> Door
-
-        # Global door state per color:
-        # Doors 1 & 2: Always open (act as switches).
-        # Doors 3 & 4: Closed initially (False).
-        self.door_closed_state = {
-            "RED": {3: False, 4: False},
-            "BLUE": {3: False, 4: False},
-            "GREEN": {3: False, 4: False}
+        self.keys: List[Tuple[int, int]] = []
+        self.doors: List[Door] = []
+        self.door_map: Dict[Tuple[int, int], Door] = {}
+        
+        # For each color, True means Door 1 is OPEN (1) & Door 2 is CLOSED (0).
+        # False means Door 1 is CLOSED (0) & Door 2 is OPEN (1).
+        # Guaranteed always either (1, 0) or (0, 1).
+        self.color_phase: Dict[str, bool] = {
+            "RED": True,
+            "BLUE": False,
+            "GREEN": True
         }
-
-        # Revision counter to notify agents when world changes
+        
+        self.toggle_timer = 0.0
         self.revision = 0
         self.setup_world()
-
-    def _get_reachable_cells(self, start_pos, check_closed_doors=True):
-        """Returns set of reachable cells from start_pos considering door states."""
-        visited = {start_pos}
-        queue = [start_pos]
-        for curr in queue:
-            for nxt in self.maze.get_neighbors(curr[0], curr[1]):
-                if nxt not in visited:
-                    if not check_closed_doors or self.is_door_passable(nxt[0], nxt[1]):
-                        visited.add(nxt)
-                        queue.append(nxt)
-        return visited
 
     def setup_world(self):
         self.start_pos = (0, 0)
         all_cells = self.maze.get_all_cells()
         colors = ["RED", "BLUE", "GREEN"]
 
-        # Loop until a configuration is generated where:
-        # - Keys are placed behind Door 3/4
-        # - Exit and open doors 1 & 2 are reachable from Start
-        # - When Doors 3 & 4 open, keys become fully reachable
-        for attempt in range(200):
-            self.reset_doors()
-            used = {self.start_pos}
-
-            # 1. Exit cell: placed far from Start in open area
+        for _ in range(200):
+            # 1. Exit cell: placed far from Start
             cells_by_dist = sorted(
                 all_cells,
                 key=lambda p: self.maze.shortest_path_dist(self.start_pos, p),
                 reverse=True
             )
             self.exit_pos = cells_by_dist[0]
-            used.add(self.exit_pos)
+            used = {self.start_pos, self.exit_pos}
 
-            # Find dead-end or chamber cells for keys
+            # 2. Select 3 key positions across the maze
             dead_ends = [
                 p for p in all_cells
                 if len(self.maze.get_neighbors(p[0], p[1])) == 1
-                and p != self.start_pos and p != self.exit_pos
+                and p not in used
             ]
             random.shuffle(dead_ends)
 
             other_candidates = [
                 p for p in all_cells
-                if p not in used and p != self.start_pos and p != self.exit_pos
+                if p not in used
             ]
             random.shuffle(other_candidates)
 
-            # Select 3 key positions
             key_positions = []
             for _ in range(3):
                 if dead_ends:
@@ -105,146 +86,118 @@ class World:
 
             self.keys = key_positions
 
-            # Place 4 doors for each of the 3 colors:
-            # Door 1: Open switch
-            # Door 2: Open switch
-            # Door 3: Closed gate (guarding the key's entrance)
-            # Door 4: Closed gate (secondary gate / alternate route)
+            # 3. Select 2 distinct doors for each of the 3 colors (6 doors total)
+            # Choose cells that have at least 2 neighbors (passageways/corridors)
+            corridor_cells = [
+                p for p in all_cells
+                if p not in used and len(self.maze.get_neighbors(p[0], p[1])) >= 2
+            ]
+            random.shuffle(corridor_cells)
+
+            if len(corridor_cells) < 6:
+                continue
+
             self.doors = []
             self.door_map = {}
 
-            door_placement_success = True
-            remaining_free = [p for p in all_cells if p not in used and p != self.start_pos and p != self.exit_pos]
-            random.shuffle(remaining_free)
+            door_placed_successfully = True
+            for color in colors:
+                d1_pos = corridor_cells.pop()
+                used.add(d1_pos)
+                d1 = Door(d1_pos[0], d1_pos[1], color, 1)
 
-            for idx, color in enumerate(colors):
-                key_pos = self.keys[idx]
-                key_neighbors = self.maze.get_neighbors(key_pos[0], key_pos[1])
-                door3_pos = None
+                d2_pos = corridor_cells.pop()
+                used.add(d2_pos)
+                d2 = Door(d2_pos[0], d2_pos[1], color, 2)
 
-                # Find a neighbor cell of the key to place Door 3 (directly gating the key)
-                for kn in key_neighbors:
-                    if kn not in used and kn != self.start_pos and kn != self.exit_pos:
-                        door3_pos = kn
-                        break
+                self.doors.extend([d1, d2])
+                self.door_map[d1_pos] = d1
+                self.door_map[d2_pos] = d2
 
-                if not door3_pos and remaining_free:
-                    door3_pos = remaining_free.pop()
+            # Validate that every key and the exit have unobstructed active paths
+            test_phases = [
+                {"RED": True, "BLUE": False, "GREEN": True},
+                {"RED": False, "BLUE": True, "GREEN": False}
+            ]
+            valid_reachability = True
+            for ph in test_phases:
+                visited = {self.start_pos}
+                queue = [self.start_pos]
+                for curr in queue:
+                    for nxt in self.maze.get_neighbors(curr[0], curr[1]):
+                        if nxt not in visited:
+                            d = self.door_map.get(nxt)
+                            is_open = True
+                            if d is not None:
+                                phase = ph[d.color]
+                                is_open = phase if d.door_id == 1 else (not phase)
+                            if is_open:
+                                visited.add(nxt)
+                                queue.append(nxt)
 
-                if not door3_pos:
-                    door_placement_success = False
+                if not (self.exit_pos in visited and all(k in visited for k in self.keys)):
+                    valid_reachability = False
                     break
 
-                used.add(door3_pos)
-                d3 = Door(door3_pos[0], door3_pos[1], color, 3)
-                self.doors.append(d3)
-                self.door_map[door3_pos] = d3
-
-                # Door 4 (another closed gate for this color)
-                if not remaining_free:
-                    door_placement_success = False
-                    break
-                door4_pos = remaining_free.pop()
-                used.add(door4_pos)
-                d4 = Door(door4_pos[0], door4_pos[1], color, 4)
-                self.doors.append(d4)
-                self.door_map[door4_pos] = d4
-
-                # Door 1 & Door 2 (open switch doors for this color)
-                if len(remaining_free) < 2:
-                    door_placement_success = False
-                    break
-                door1_pos = remaining_free.pop()
-                used.add(door1_pos)
-                d1 = Door(door1_pos[0], door1_pos[1], color, 1)
-                self.doors.append(d1)
-                self.door_map[door1_pos] = d1
-
-                door2_pos = remaining_free.pop()
-                used.add(door2_pos)
-                d2 = Door(door2_pos[0], door2_pos[1], color, 2)
-                self.doors.append(d2)
-                self.door_map[door2_pos] = d2
-
-            if not door_placement_success:
-                continue
-
-            # Verify initial connectivity:
-            # - Start can reach all open doors (1 & 2) and Exit
-            initial_reachable = self._get_reachable_cells(self.start_pos, check_closed_doors=True)
-            all_switches_reachable = all(
-                d.pos in initial_reachable for d in self.doors if d.number in (1, 2)
-            )
-
-            # Test reachability when doors 3 & 4 are opened
-            for c in colors:
-                self.door_closed_state[c][3] = True
-                self.door_closed_state[c][4] = True
-
-            unlocked_reachable = self._get_reachable_cells(self.start_pos, check_closed_doors=True)
-            all_keys_reachable_when_unlocked = all(k in unlocked_reachable for k in self.keys)
-
-            self.reset_doors()
-
-            if all_switches_reachable and all_keys_reachable_when_unlocked and self.exit_pos in initial_reachable:
+            if valid_reachability and door_placed_successfully:
                 break
 
-        self.reset_doors()
-
-    def reset_doors(self):
-        self.door_closed_state = {
-            "RED": {3: False, 4: False},
-            "BLUE": {3: False, 4: False},
-            "GREEN": {3: False, 4: False}
+        self.color_phase = {
+            "RED": True,
+            "BLUE": False,
+            "GREEN": True
         }
+        self.toggle_timer = 0.0
         self.revision += 1
 
-    def is_door_passable(self, r: int, c: int, allow_closed: bool = False) -> bool:
-        """Returns True if the cell is not a closed door (or allow_closed is True)."""
+    def is_door_open(self, door: Door) -> bool:
+        """Returns True if the door is open (1), False if closed (0)."""
+        phase = self.color_phase[door.color]
+        if door.door_id == 1:
+            return phase      # 1 if True, 0 if False
+        else:
+            return not phase  # 0 if True, 1 if False
+
+    def is_cell_passable(self, r: int, c: int) -> bool:
+        """Returns True if cell has no door or its door is currently open."""
         door = self.door_map.get((r, c))
         if not door:
             return True
-        if door.number in (1, 2):
-            return True
-        # Door 3 or 4: passable if open or if hypothetical search path planning allows it
-        if allow_closed:
-            return True
-        return self.door_closed_state[door.color][door.number]
+        return self.is_door_open(door)
 
-    def on_agent_enter_cell(self, r: int, c: int) -> bool:
+    def toggle_color(self, color: str):
+        """Toggles the phase of the given color: (1, 0) becomes (0, 1) and vice-versa."""
+        self.color_phase[color] = not self.color_phase[color]
+        self.revision += 1
+
+    def get_partner_door(self, door: Door) -> Optional[Door]:
+        """Returns the other door of the same color."""
+        partner_id = 2 if door.door_id == 1 else 1
+        for d in self.doors:
+            if d.color == door.color and d.door_id == partner_id:
+                return d
+        return None
+
+    def on_agent_pass_door(self, r: int, c: int) -> bool:
         """
-        Triggered when an agent steps into a cell.
-        If the cell is an open door (Door 1 or 2), it opens Door 3 & 4 of that color.
-        If the cell is Door 3 or 4, passing through closes it again.
-        Returns True if the world changed (requiring other agents to re-check).
+        Triggered when an agent steps through an open door.
+        Toggles that color pair so the passed door closes and its partner opens.
+        Returns True if a toggle occurred.
         """
         door = self.door_map.get((r, c))
-        if not door:
-            return False
-
-        changed = False
-        color = door.color
-        if door.number in (1, 2):
-            # Passing through open Door 1 or 2 OPENS closed Door 3 and Door 4
-            if not self.door_closed_state[color][3] or not self.door_closed_state[color][4]:
-                self.door_closed_state[color][3] = True
-                self.door_closed_state[color][4] = True
-                changed = True
-        elif door.number in (3, 4):
-            # Door 3 & 4 remain open once unlocked by switches so agents can retrieve keys and return safely
-            pass
-
-        if changed:
-            self.revision += 1
-        return changed
+        if door is not None and self.is_door_open(door):
+            self.toggle_color(door.color)
+            return True
+        return False
 
     def get_valid_neighbors(self, r: int, c: int, allow_hypothetical: bool = True):
         """
         Returns adjacent reachable cells considering maze walls
-        and doors (with allow_hypothetical allowing future planned traversal through closed doors).
+        and physical door states (if allow_hypothetical is False, closed doors are blocked).
         """
         neighbors = []
         for nr, nc in self.maze.get_neighbors(r, c):
-            if self.is_door_passable(nr, nc, allow_closed=allow_hypothetical):
+            if allow_hypothetical or self.is_cell_passable(nr, nc):
                 neighbors.append((nr, nc))
         return neighbors
+

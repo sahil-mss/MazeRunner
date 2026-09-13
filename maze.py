@@ -46,11 +46,11 @@ class Maze:
             else:
                 stack.pop()
 
-        # Add small braided loops (about 4% of interior walls removed)
-        # to ensure multiple interesting alternative routes for racing agents!
+        # Add braided loops (about 12% of interior walls removed)
+        # to ensure multiple alternative routes and loops around doors!
         for r in range(1, self.rows - 1):
             for c in range(1, self.cols - 1):
-                if random.random() < 0.04:
+                if random.random() < 0.12:
                     if random.random() < 0.5:
                         self.cells[r][c][1] = False
                         self.cells[r][c + 1][3] = False
