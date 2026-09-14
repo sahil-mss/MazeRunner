@@ -1,3 +1,23 @@
+# Virtual environment
 .venv/
+venv/
+ENV/
+env/
+
+# Python cache & artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
